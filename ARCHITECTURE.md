@@ -1,0 +1,1 @@
+Um ponto é que aqui no ambiente de teste / desafio, o money negativo não passa pelo from, então Money.from(money.toJSON()) falha se for negativo.
