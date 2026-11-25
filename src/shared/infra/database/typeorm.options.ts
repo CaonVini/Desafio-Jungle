@@ -1,6 +1,8 @@
-import { DataSourceOptions } from "typeorm";
+import type { DataSourceOptions } from "typeorm";
 
-export function buildTypeOrmOptions(): DataSourceOptions {
+type PostgresConnectionOptions = Extract<DataSourceOptions, { type: "postgres" }>;
+
+export function buildTypeOrmOptions(): PostgresConnectionOptions {
   return {
     type: "postgres",
     host: process.env.DB_HOST ?? "localhost",
