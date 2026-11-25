@@ -1,5 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { v7 as uuidv7 } from "uuid";
+import { OutboxEventType } from "../../outbox/domain/outbox-event";
+import { OutboxRepository } from "../../outbox/domain/outbox.repository";
 import { hashPayload } from "../../shared/application/payload-hash";
 import { DomainError } from "../../shared/domain/domain-error";
 import { Money, MoneyProps } from "../../shared/domain/money";
@@ -19,6 +21,11 @@ import { WagerTransactionRepository } from "../domain/wager-transaction.reposito
 import { toWagerTransactionOutput, WagerTransactionOutput } from "./wager-transaction.output";
 
 const REFERENCE_RETRY_DELAY_MS = 5_000;
+
+const EVENT_BY_STATUS: Partial<Record<WagerTransactionStatus, OutboxEventType>> = {
+  [WagerTransactionStatus.Processed]: OutboxEventType.WagerTransactionProcessed,
+  [WagerTransactionStatus.Rejected]: OutboxEventType.WagerTransactionRejected,
+};
 
 export interface ProcessWagerTransactionInput {
   providerId: string;
@@ -44,6 +51,7 @@ export class ProcessWagerTransactionUseCase {
     private readonly transactionManager: TransactionManager,
     private readonly wallets: WalletRepository,
     private readonly transactions: WagerTransactionRepository,
+    private readonly outbox: OutboxRepository,
   ) {}
 
   async execute(input: ProcessWagerTransactionInput): Promise<ProcessWagerTransactionResult> {
@@ -118,7 +126,27 @@ export class ProcessWagerTransactionUseCase {
         await this.wallets.updateBalance(tx, wallet, expectedVersion);
       }
 
+      await this.recordOutcome(tx, transaction, now);
+
       return { transaction: toWagerTransactionOutput(transaction), idempotentReplay: false };
+    });
+  }
+
+  private async recordOutcome(
+    tx: TransactionContext,
+    transaction: WagerTransaction,
+    now: Date,
+  ): Promise<void> {
+    const eventType = EVENT_BY_STATUS[transaction.status];
+    if (!eventType) {
+      return;
+    }
+    await this.outbox.append(tx, {
+      id: uuidv7(),
+      transactionId: transaction.id,
+      eventType,
+      payload: { ...toWagerTransactionOutput(transaction) },
+      createdAt: now,
     });
   }
 
