@@ -16,6 +16,21 @@ services:
       timeout: 3s
       retries: 10
 
+  localstack:                                   # NOVO
+    image: localstack/localstack:${LOCALSTACK_IMAGE_TAG:-4.12}
+    container_name: wagering-localstack
+    environment:
+      SERVICES: sqs
+      AWS_DEFAULT_REGION: us-east-1
+    ports:
+      - "4566:4566"
+    volumes:
+      - ./localstack/init:/etc/localstack/init/ready.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "[ \"$$(awslocal sqs list-queues | grep -c wagering-events)\" = \"2\" ]"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
 volumes:
   pgdata:
-
