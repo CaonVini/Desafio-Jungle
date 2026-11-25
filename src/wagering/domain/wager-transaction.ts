@@ -2,7 +2,7 @@ import { DomainError } from "../../shared/domain/domain-error";
 import { Money } from "../../shared/domain/money";
 import { LedgerDirection } from "../../wallet/domain/ledger-direction";
 import { InvalidTransactionStateError } from "./invalid-transaction-state.error";
-import { FailureCode, WagerTransactionKind, WagerTransactionStatus } from "./transaction.enums";
+import { FailureCode, WagerTransactionKind, WagerTransactionStatus } from "./wager-transaction.enums";
 
 export interface CreateWagerTransactionProps {
   id: string;

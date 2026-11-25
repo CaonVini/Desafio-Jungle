@@ -1,5 +1,5 @@
 import { DomainError } from "../../shared/domain/domain-error";
-import { WagerTransactionStatus } from "./transaction.enums";
+import { WagerTransactionStatus } from "./wager-transaction.enums";
 
 export class InvalidTransactionStateError extends DomainError {
   constructor(transactionId: string, status: WagerTransactionStatus, action: string) {
