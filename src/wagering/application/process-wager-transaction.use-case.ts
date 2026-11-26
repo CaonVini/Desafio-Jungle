@@ -40,6 +40,12 @@ export interface ProcessWagerTransactionInput {
   referenceExternalTransactionId?: string;
 }
 
+interface PreparedInput {
+  money: Money;
+  payloadHash: string;
+  now: Date;
+}
+
 export interface ProcessWagerTransactionResult {
   transaction: WagerTransactionOutput;
   idempotentReplay: boolean;
@@ -55,6 +61,18 @@ export class ProcessWagerTransactionUseCase {
   ) {}
 
   async execute(input: ProcessWagerTransactionInput): Promise<ProcessWagerTransactionResult> {
+    const prepared = this.prepare(input);
+    return this.transactionManager.run((tx) => this.process(tx, input, prepared));
+  }
+
+  executeWithin(
+    tx: TransactionContext,
+    input: ProcessWagerTransactionInput,
+  ): Promise<ProcessWagerTransactionResult> {
+    return this.process(tx, input, this.prepare(input));
+  }
+
+  private prepare(input: ProcessWagerTransactionInput): PreparedInput {
     const money = Money.from(input.money);
     const payloadHash = hashPayload({
       providerId: input.providerId,
@@ -67,69 +85,73 @@ export class ProcessWagerTransactionUseCase {
       money: money.toJSON(),
       referenceExternalTransactionId: input.referenceExternalTransactionId,
     });
-    const now = new Date();
+    return { money, payloadHash, now: new Date() };
+  }
 
-    return this.transactionManager.run(async (tx) => {
-      const wallet = await this.wallets.findByIdForUpdate(tx, input.walletId);
-      if (!wallet) {
-        throw new DomainError("Wallet not found", "WALLET_NOT_FOUND");
+  private async process(
+    tx: TransactionContext,
+    input: ProcessWagerTransactionInput,
+    { money, payloadHash, now }: PreparedInput,
+  ): Promise<ProcessWagerTransactionResult> {
+    const wallet = await this.wallets.findByIdForUpdate(tx, input.walletId);
+    if (!wallet) {
+      throw new DomainError("Wallet not found", "WALLET_NOT_FOUND");
+    }
+
+    const existing =
+      (await this.transactions.findByProviderAndIdempotencyKey(
+        tx,
+        input.providerId,
+        input.idempotencyKey,
+      )) ??
+      (await this.transactions.findByProviderAndExternalId(
+        tx,
+        input.providerId,
+        input.externalTransactionId,
+      ));
+
+    if (existing) {
+      if (!existing.matchesPayload(payloadHash)) {
+        throw new DomainError(
+          "Idempotency key or external transaction id already used with a different payload",
+          "IDEMPOTENCY_CONFLICT",
+        );
       }
+      return { transaction: toWagerTransactionOutput(existing), idempotentReplay: true };
+    }
 
-      const existing =
-        (await this.transactions.findByProviderAndIdempotencyKey(
-          tx,
-          input.providerId,
-          input.idempotencyKey,
-        )) ??
-        (await this.transactions.findByProviderAndExternalId(
-          tx,
-          input.providerId,
-          input.externalTransactionId,
-        ));
-
-      if (existing) {
-        if (!existing.matchesPayload(payloadHash)) {
-          throw new DomainError(
-            "Idempotency key or external transaction id already used with a different payload",
-            "IDEMPOTENCY_CONFLICT",
-          );
-        }
-        return { transaction: toWagerTransactionOutput(existing), idempotentReplay: true };
-      }
-
-      const transaction = WagerTransaction.create({
-        id: uuidv7(),
-        providerId: input.providerId,
-        externalTransactionId: input.externalTransactionId,
-        idempotencyKey: input.idempotencyKey,
-        payloadHash,
-        walletId: input.walletId,
-        playerId: input.playerId,
-        roundId: input.roundId,
-        gameId: input.gameId,
-        kind: input.kind,
-        money,
-        referenceExternalTransactionId: input.referenceExternalTransactionId,
-        createdAt: now,
-      });
-
-      const expectedVersion = wallet.version;
-      const entry = await this.settle(tx, wallet, transaction, now);
-
-      const inserted = await this.transactions.insertIfAbsent(tx, transaction);
-      if (!inserted) {
-        throw new DomainError("Transaction already registered", "IDEMPOTENCY_CONFLICT");
-      }
-
-      if (entry) {
-        await this.wallets.addLedgerEntry(tx, entry);
-        await this.wallets.updateBalance(tx, wallet, expectedVersion);
-      }
-
-      await this.recordOutcome(tx, transaction, now);
-
-      return { transaction: toWagerTransactionOutput(transaction), idempotentReplay: false };
+    const transaction = WagerTransaction.create({
+      id: uuidv7(),
+      providerId: input.providerId,
+      externalTransactionId: input.externalTransactionId,
+      idempotencyKey: input.idempotencyKey,
+      payloadHash,
+      walletId: input.walletId,
+      playerId: input.playerId,
+      roundId: input.roundId,
+      gameId: input.gameId,
+      kind: input.kind,
+      money,
+      referenceExternalTransactionId: input.referenceExternalTransactionId,
+      createdAt: now,
     });
+
+    const expectedVersion = wallet.version;
+    const entry = await this.settle(tx, wallet, transaction, now);
+
+    const inserted = await this.transactions.insertIfAbsent(tx, transaction);
+    if (!inserted) {
+      throw new DomainError("Transaction already registered", "IDEMPOTENCY_CONFLICT");
+    }
+
+    if (entry) {
+      await this.wallets.addLedgerEntry(tx, entry);
+      await this.wallets.updateBalance(tx, wallet, expectedVersion);
+    }
+
+    await this.recordOutcome(tx, transaction, now);
+
+    return { transaction: toWagerTransactionOutput(transaction), idempotentReplay: false };
   }
 
   private async recordOutcome(
