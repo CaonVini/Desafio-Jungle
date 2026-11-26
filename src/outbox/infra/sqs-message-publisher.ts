@@ -11,9 +11,9 @@ export class SqsMessagePublisher extends MessagePublisher implements OnModuleDes
 
   constructor() {
     super();
-    const queueUrl = process.env.SQS_QUEUE_URL;
+    const queueUrl = process.env.SQS_EVENTS_QUEUE_URL;
     if (!queueUrl) {
-      throw new Error("SQS_QUEUE_URL is required (see .env.example)");
+      throw new Error("SQS_EVENTS_QUEUE_URL is required (see .env.example)");
     }
     this.queueUrl = queueUrl;
     this.client = new SQSClient({
