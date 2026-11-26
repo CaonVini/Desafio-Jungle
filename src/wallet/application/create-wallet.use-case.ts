@@ -54,6 +54,7 @@ export class CreateWalletUseCase {
           createdAt: now,
         });
         opening.markProcessed(undefined, now);
+        opening.observeBalance(initialBalance);
         await this.transactions.insertIfAbsent(tx, opening);
 
         const entry = WalletLedgerEntry.create({
