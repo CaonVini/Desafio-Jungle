@@ -1,31 +1,32 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, Logger } from "@nestjs/common";
 import { v7 as uuidv7 } from "uuid";
-import { OutboxEventType } from "../../outbox/domain/outbox-event";
+import { MetricsService } from "../../metrics/metrics.service";
+import { EventContext, IntegrationEvent } from "../../outbox/domain/integration-event";
 import { OutboxRepository } from "../../outbox/domain/outbox.repository";
 import { hashPayload } from "../../shared/application/payload-hash";
 import { DomainError } from "../../shared/domain/domain-error";
 import { Money, MoneyProps } from "../../shared/domain/money";
 import { TransactionContext, TransactionManager } from "../../shared/domain/transaction-manager";
+import { currentCorrelationId } from "../../shared/logging/correlation";
 import { InsufficientFundsError } from "../../wallet/domain/insufficient-funds.error";
 import { LedgerDirection } from "../../wallet/domain/ledger-direction";
 import { Wallet } from "../../wallet/domain/wallet";
 import { WalletLedgerEntry } from "../../wallet/domain/wallet-ledger-entry";
 import { WalletRepository } from "../../wallet/domain/wallet.repository";
+import { WalletBalanceChanged } from "../../wallet/events/wallet-balance-changed.event";
 import { WagerTransaction } from "../domain/wager-transaction";
 import {
   FailureCode,
   WagerTransactionKind,
   WagerTransactionStatus,
 } from "../domain/wager-transaction.enums";
+import { MAX_REFERENCE_ATTEMPTS, referenceRetryDelayMs } from "../domain/reference-retry-policy";
 import { WagerTransactionRepository } from "../domain/wager-transaction.repository";
+import { WagerTransactionPendingReference } from "../events/wager-transaction-pending-reference.event";
+import { WagerTransactionProcessed } from "../events/wager-transaction-processed.event";
+import { WagerTransactionRejected } from "../events/wager-transaction-rejected.event";
+import { logTransaction } from "./transaction-log";
 import { toWagerTransactionOutput, WagerTransactionOutput } from "./wager-transaction.output";
-
-const REFERENCE_RETRY_DELAY_MS = 5_000;
-
-const EVENT_BY_STATUS: Partial<Record<WagerTransactionStatus, OutboxEventType>> = {
-  [WagerTransactionStatus.Processed]: OutboxEventType.WagerTransactionProcessed,
-  [WagerTransactionStatus.Rejected]: OutboxEventType.WagerTransactionRejected,
-};
 
 export interface ProcessWagerTransactionInput {
   providerId: string;
@@ -43,7 +44,6 @@ export interface ProcessWagerTransactionInput {
 interface PreparedInput {
   money: Money;
   payloadHash: string;
-  now: Date;
 }
 
 export interface ProcessWagerTransactionResult {
@@ -53,23 +53,86 @@ export interface ProcessWagerTransactionResult {
 
 @Injectable()
 export class ProcessWagerTransactionUseCase {
+  private readonly logger = new Logger(ProcessWagerTransactionUseCase.name);
+
   constructor(
     private readonly transactionManager: TransactionManager,
     private readonly wallets: WalletRepository,
     private readonly transactions: WagerTransactionRepository,
     private readonly outbox: OutboxRepository,
+    private readonly metrics: MetricsService,
   ) {}
 
   async execute(input: ProcessWagerTransactionInput): Promise<ProcessWagerTransactionResult> {
+    const startedAt = performance.now();
     const prepared = this.prepare(input);
-    return this.transactionManager.run((tx) => this.process(tx, input, prepared));
+    const result = await this.guarded(() =>
+      this.transactionManager.run((tx) => this.process(tx, input, prepared)),
+    );
+    this.metrics.recordResult(
+      result.transaction.status,
+      result.idempotentReplay,
+      performance.now() - startedAt,
+    );
+    logTransaction(this.logger, result.transaction, { idempotentReplay: result.idempotentReplay });
+    return result;
   }
 
   executeWithin(
     tx: TransactionContext,
     input: ProcessWagerTransactionInput,
   ): Promise<ProcessWagerTransactionResult> {
-    return this.process(tx, input, this.prepare(input));
+    return this.guarded(() => this.process(tx, input, this.prepare(input)));
+  }
+
+  async retryPendingReference(
+    transactionId: string,
+    now: Date = new Date(),
+  ): Promise<WagerTransactionOutput | undefined> {
+    return this.guarded(() => this.retryWithin(transactionId, now));
+  }
+
+  private retryWithin(
+    transactionId: string,
+    now: Date,
+  ): Promise<WagerTransactionOutput | undefined> {
+    return this.transactionManager.run(async (tx) => {
+      const candidate = await this.transactions.findById(tx, transactionId);
+      if (candidate?.status !== WagerTransactionStatus.PendingReference) {
+        return undefined;
+      }
+
+      const wallet = await this.wallets.findByIdForUpdate(tx, candidate.walletId);
+      const transaction = await this.transactions.findById(tx, transactionId);
+      const stillDue =
+        transaction?.status === WagerTransactionStatus.PendingReference &&
+        (transaction.nextAttemptAt === undefined || transaction.nextAttemptAt <= now);
+      if (!wallet || !transaction || !stillDue) {
+        return undefined;
+      }
+
+      const expectedVersion = wallet.version;
+      const entry = await this.settle(tx, wallet, transaction, now);
+      transaction.observeBalance(wallet.balance);
+      await this.transactions.update(tx, transaction);
+
+      if (entry) {
+        await this.wallets.addLedgerEntry(tx, entry);
+        await this.wallets.updateBalance(tx, wallet, expectedVersion);
+      }
+
+      await this.recordOutcome(tx, wallet, transaction, entry, now, false);
+      return toWagerTransactionOutput(transaction);
+    });
+  }
+
+  private async guarded<T>(work: () => Promise<T>): Promise<T> {
+    try {
+      return await work();
+    } catch (error) {
+      this.metrics.failure(error);
+      throw error;
+    }
   }
 
   private prepare(input: ProcessWagerTransactionInput): PreparedInput {
@@ -85,18 +148,19 @@ export class ProcessWagerTransactionUseCase {
       money: money.toJSON(),
       referenceExternalTransactionId: input.referenceExternalTransactionId,
     });
-    return { money, payloadHash, now: new Date() };
+    return { money, payloadHash };
   }
 
   private async process(
     tx: TransactionContext,
     input: ProcessWagerTransactionInput,
-    { money, payloadHash, now }: PreparedInput,
+    { money, payloadHash }: PreparedInput,
   ): Promise<ProcessWagerTransactionResult> {
     const wallet = await this.wallets.findByIdForUpdate(tx, input.walletId);
     if (!wallet) {
       throw new DomainError("Wallet not found", "WALLET_NOT_FOUND");
     }
+    const now = new Date();
 
     const existing =
       (await this.transactions.findByProviderAndIdempotencyKey(
@@ -138,6 +202,7 @@ export class ProcessWagerTransactionUseCase {
 
     const expectedVersion = wallet.version;
     const entry = await this.settle(tx, wallet, transaction, now);
+    transaction.observeBalance(wallet.balance);
 
     const inserted = await this.transactions.insertIfAbsent(tx, transaction);
     if (!inserted) {
@@ -149,26 +214,67 @@ export class ProcessWagerTransactionUseCase {
       await this.wallets.updateBalance(tx, wallet, expectedVersion);
     }
 
-    await this.recordOutcome(tx, transaction, now);
+    await this.recordOutcome(tx, wallet, transaction, entry, now, true);
 
     return { transaction: toWagerTransactionOutput(transaction), idempotentReplay: false };
   }
 
   private async recordOutcome(
     tx: TransactionContext,
+    wallet: Wallet,
     transaction: WagerTransaction,
+    entry: WalletLedgerEntry | undefined,
     now: Date,
+    firstAttempt: boolean,
   ): Promise<void> {
-    const eventType = EVENT_BY_STATUS[transaction.status];
-    if (!eventType) {
-      return;
+    const context: EventContext = {
+      correlationId: currentCorrelationId() ?? uuidv7(),
+      occurredAt: now,
+    };
+
+    const outcome = this.outcomeEvent(transaction, context, firstAttempt);
+    if (outcome) {
+      await this.appendEvent(tx, transaction.id, outcome);
     }
+    if (entry) {
+      const balanceChanged = WalletBalanceChanged.from(wallet, entry, {
+        ...context,
+        causationId: transaction.id,
+      });
+      await this.appendEvent(tx, transaction.id, balanceChanged);
+    }
+  }
+
+  private outcomeEvent(
+    transaction: WagerTransaction,
+    context: EventContext,
+    firstAttempt: boolean,
+  ): IntegrationEvent<unknown> | undefined {
+    switch (transaction.status) {
+      case WagerTransactionStatus.Processed:
+        return WagerTransactionProcessed.from(transaction, context);
+      case WagerTransactionStatus.Rejected:
+        return WagerTransactionRejected.from(transaction, context);
+      case WagerTransactionStatus.PendingReference:
+        return firstAttempt
+          ? WagerTransactionPendingReference.from(transaction, context)
+          : undefined;
+      default:
+        return undefined;
+    }
+  }
+
+  private async appendEvent(
+    tx: TransactionContext,
+    transactionId: string,
+    event: IntegrationEvent<unknown>,
+  ): Promise<void> {
     await this.outbox.append(tx, {
-      id: uuidv7(),
-      transactionId: transaction.id,
-      eventType,
-      payload: { ...toWagerTransactionOutput(transaction) },
-      createdAt: now,
+      id: event.eventId,
+      transactionId,
+      eventType: event.eventType,
+      payload: event.toJSON(),
+      createdAt: event.occurredAt,
     });
   }
 
@@ -196,7 +302,14 @@ export class ProcessWagerTransactionUseCase {
       );
 
       if (!reference || reference.status === WagerTransactionStatus.PendingReference) {
-        transaction.markPendingReference(new Date(now.getTime() + REFERENCE_RETRY_DELAY_MS));
+        if (transaction.referenceAttempts >= MAX_REFERENCE_ATTEMPTS) {
+          transaction.reject(
+            reference ? FailureCode.ReferenceNotProcessed : FailureCode.ReferenceNotFound,
+          );
+          return undefined;
+        }
+        const delay = referenceRetryDelayMs(transaction.referenceAttempts + 1);
+        transaction.markPendingReference(new Date(now.getTime() + delay));
         return undefined;
       }
 

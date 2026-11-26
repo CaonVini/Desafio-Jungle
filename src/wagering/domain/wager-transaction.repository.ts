@@ -21,6 +21,12 @@ export abstract class WagerTransactionRepository {
 
   abstract update(tx: TransactionContext, transaction: WagerTransaction): Promise<void>;
 
+  abstract findDuePendingReference(
+    tx: TransactionContext,
+    now: Date,
+    limit: number,
+  ): Promise<WagerTransaction[]>;
+
   abstract hasProcessedReversal(
     tx: TransactionContext,
     referenceTransactionId: string,

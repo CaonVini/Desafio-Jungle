@@ -1,4 +1,5 @@
 import { Injectable } from "@nestjs/common";
+import { LessThanOrEqual } from "typeorm";
 import { DomainError } from "../../shared/domain/domain-error";
 import { TransactionContext } from "../../shared/domain/transaction-manager";
 import { asManager, isUniqueViolation } from "../../shared/infra/database/typeorm-helpers";
@@ -60,6 +61,7 @@ export class TypeOrmWagerTransactionRepository extends WagerTransactionRepositor
           failureCode: transaction.failureCode ?? null,
           referenceAttempts: transaction.referenceAttempts,
           nextAttemptAt: transaction.nextAttemptAt ?? null,
+          balanceAfter: transaction.balanceAfter?.toString() ?? null,
           processedAt: transaction.processedAt ?? null,
         },
       );
@@ -69,6 +71,22 @@ export class TypeOrmWagerTransactionRepository extends WagerTransactionRepositor
       }
       throw error;
     }
+  }
+
+  async findDuePendingReference(
+    tx: TransactionContext,
+    now: Date,
+    limit: number,
+  ): Promise<WagerTransaction[]> {
+    const entities = await asManager(tx).find(WagerTransactionOrmEntity, {
+      where: {
+        status: WagerTransactionStatus.PendingReference,
+        nextAttemptAt: LessThanOrEqual(now),
+      },
+      order: { nextAttemptAt: "ASC" },
+      take: limit,
+    });
+    return entities.map((entity) => WagerTransactionMapper.toDomain(entity));
   }
 
   async hasProcessedReversal(

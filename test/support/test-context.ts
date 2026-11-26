@@ -1,18 +1,25 @@
 import { expect } from "bun:test";
+import { INestApplication } from "@nestjs/common";
 import { ConfigModule } from "@nestjs/config";
 import { Test, TestingModule } from "@nestjs/testing";
 import { TypeOrmModule } from "@nestjs/typeorm";
 import { DataSource } from "typeorm";
+import { configureApp } from "../../src/app.setup";
+import { HealthModule } from "../../src/health/health.module";
+import { MetricsModule } from "../../src/metrics/metrics.module";
+import { MetricsService } from "../../src/metrics/metrics.service";
 import { OutboxPublisherService } from "../../src/outbox/application/outbox-publisher.service";
 import { MessagePublisher } from "../../src/outbox/domain/message-publisher";
 import { OutboxModule } from "../../src/outbox/outbox.module";
 import { PersistenceModule } from "../../src/persistence.module";
 import { buildTypeOrmOptions } from "../../src/shared/infra/database/typeorm.options";
 import { WagerTransactionConsumer } from "../../src/wagering/messaging/wager-transaction-consumer";
+import { PendingReferenceService } from "../../src/wagering/application/pending-reference.service";
 import { ProcessWagerTransactionUseCase } from "../../src/wagering/application/process-wager-transaction.use-case";
 import { WageringModule } from "../../src/wagering/wagering.module";
 import { CreateWalletUseCase } from "../../src/wallet/application/create-wallet.use-case";
 import { GetWalletUseCase } from "../../src/wallet/application/get-wallet.use-case";
+import { ReconcileWalletUseCase } from "../../src/wallet/application/reconcile-wallet.use-case";
 import { WalletModule } from "../../src/wallet/wallet.module";
 import { FakeMessagePublisher } from "./fake-message-publisher";
 import { prepareTestDatabase, TEST_DATABASE } from "./test-database";
@@ -26,6 +33,10 @@ export interface TestContext {
   outboxPublisher: OutboxPublisherService;
   broker: FakeMessagePublisher;
   consumer: WagerTransactionConsumer;
+  pendingReferences: PendingReferenceService;
+  reconcileWallet: ReconcileWalletUseCase;
+  metrics: MetricsService;
+  startHttp(): Promise<string>;
   reset(): Promise<void>;
   close(): Promise<void>;
   ledgerCount(walletId: string, direction?: "DEBIT" | "CREDIT"): Promise<number>;
@@ -60,12 +71,16 @@ export async function createTestContext(): Promise<TestContext> {
       OutboxModule,
       WalletModule,
       WageringModule,
+      HealthModule,
+      MetricsModule,
     ],
   })
     .overrideProvider(MessagePublisher)
     .useValue(broker)
     .compile();
-  await moduleRef.init();
+  const app: INestApplication = moduleRef.createNestApplication();
+  configureApp(app);
+  await app.init();
 
   const dataSource = moduleRef.get(DataSource, { strict: false });
 
@@ -80,9 +95,18 @@ export async function createTestContext(): Promise<TestContext> {
     outboxPublisher: moduleRef.get(OutboxPublisherService, { strict: false }),
     broker,
     consumer: moduleRef.get(WagerTransactionConsumer, { strict: false }),
+    pendingReferences: moduleRef.get(PendingReferenceService, { strict: false }),
+    reconcileWallet: moduleRef.get(ReconcileWalletUseCase, { strict: false }),
+    metrics: moduleRef.get(MetricsService, { strict: false }),
+
+    async startHttp() {
+      await app.listen(0, "127.0.0.1");
+      return (await app.getUrl()).replace("[::1]", "127.0.0.1");
+    },
 
     async reset() {
       broker.sent.length = 0;
+      moduleRef.get(MetricsService, { strict: false }).reset();
       broker.failing = false;
       if (dataSource.options.database !== TEST_DATABASE) {
         throw new Error("Refusing to truncate a database that is not the test database");
@@ -93,7 +117,7 @@ export async function createTestContext(): Promise<TestContext> {
     },
 
     async close() {
-      await moduleRef.close();
+      await app.close();
     },
 
     async ledgerCount(walletId, direction) {

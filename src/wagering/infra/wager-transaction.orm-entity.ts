@@ -56,6 +56,9 @@ export class WagerTransactionOrmEntity {
   @Column({ name: "next_attempt_at", type: "timestamptz", nullable: true })
   nextAttemptAt!: Date | null;
 
+  @Column({ name: "balance_after", type: "numeric", precision: 19, scale: 2, nullable: true })
+  balanceAfter!: string | null;
+
   @Column({ name: "created_at", type: "timestamptz" })
   createdAt!: Date;
 

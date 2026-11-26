@@ -61,7 +61,11 @@ describe("WagerTransactionConsumer (integration)", () => {
     expect(await balance()).toBe("75.00");
     expect(await ctx.ledgerCount(wallet.id, "DEBIT")).toBe(1);
     expect(await ctx.inboxCount()).toBe(1);
-    expect(await ctx.outboxEvents()).toHaveLength(1);
+    const events = await ctx.outboxEvents();
+    expect(events.map((event) => event.event_type).sort()).toEqual([
+      "WagerTransactionProcessed",
+      "WalletBalanceChanged",
+    ]);
     await expectInvariant(ctx, wallet.id);
   });
 
@@ -108,7 +112,7 @@ describe("WagerTransactionConsumer (integration)", () => {
     expect(await balance()).toBe("100.00");
     expect(await ctx.ledgerCount(wallet.id, "DEBIT")).toBe(0);
     const events = await ctx.outboxEvents();
-    expect(events[0].event_type).toBe("wager.transaction.rejected");
+    expect(events[0].event_type).toBe("WagerTransactionRejected");
   });
 
   it("erro de negocio (wallet inexistente, conflito) e terminal: confirma sem gravar o inbox", async () => {

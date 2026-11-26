@@ -40,6 +40,7 @@ export interface WagerTransactionState {
   processedAt?: Date;
   referenceAttempts: number;
   nextAttemptAt?: Date;
+  balanceAfter?: Money;
 }
 
 export class WagerTransaction {
@@ -75,6 +76,7 @@ export class WagerTransaction {
     private _processedAt?: Date,
     private _referenceAttempts = 0,
     private _nextAttemptAt?: Date,
+    private _balanceAfter?: Money,
   ) {}
 
   static create(props: CreateWagerTransactionProps): WagerTransaction {
@@ -125,6 +127,7 @@ export class WagerTransaction {
       state.processedAt,
       state.referenceAttempts,
       state.nextAttemptAt,
+      state.balanceAfter,
     );
   }
 
@@ -150,6 +153,14 @@ export class WagerTransaction {
 
   get nextAttemptAt(): Date | undefined {
     return this._nextAttemptAt;
+  }
+
+  get balanceAfter(): Money | undefined {
+    return this._balanceAfter;
+  }
+
+  observeBalance(balance: Money): void {
+    this._balanceAfter = balance;
   }
 
   markProcessed(referenceTransactionId: string | undefined, at: Date): void {

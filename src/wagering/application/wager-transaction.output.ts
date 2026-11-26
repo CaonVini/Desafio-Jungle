@@ -12,6 +12,7 @@ export interface WagerTransactionOutput {
   kind: string;
   amount: MoneyProps;
   status: string;
+  balance?: MoneyProps;
   failureCode?: string;
   referenceExternalTransactionId?: string;
   referenceTransactionId?: string;
@@ -31,10 +32,33 @@ export function toWagerTransactionOutput(transaction: WagerTransaction): WagerTr
     kind: transaction.kind,
     amount: transaction.money.toJSON(),
     status: transaction.status,
+    balance: transaction.balanceAfter?.toJSON(),
     failureCode: transaction.failureCode,
     referenceExternalTransactionId: transaction.referenceExternalTransactionId,
     referenceTransactionId: transaction.referenceTransactionId,
     processedAt: transaction.processedAt?.toISOString(),
     nextAttemptAt: transaction.nextAttemptAt?.toISOString(),
+  };
+}
+export interface ProcessTransactionResponse {
+  transactionId: string;
+  status: string;
+  balance?: MoneyProps;
+  failureCode?: string;
+  idempotentReplay: boolean;
+  transaction: WagerTransactionOutput;
+}
+
+export function toProcessResponse(
+  transaction: WagerTransactionOutput,
+  idempotentReplay: boolean,
+): ProcessTransactionResponse {
+  return {
+    transactionId: transaction.id,
+    status: transaction.status,
+    balance: transaction.balance,
+    failureCode: transaction.failureCode,
+    idempotentReplay,
+    transaction,
   };
 }
