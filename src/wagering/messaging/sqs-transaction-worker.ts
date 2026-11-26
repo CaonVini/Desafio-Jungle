@@ -7,9 +7,9 @@ import {
   SQSClient,
 } from "@aws-sdk/client-sqs";
 import { Injectable, Logger, OnApplicationBootstrap, OnApplicationShutdown } from "@nestjs/common";
+import { MetricsService } from "../../metrics/metrics.service";
 import { PermanentMessageError, WagerTransactionConsumer } from "./wager-transaction-consumer";
 
-const BASE_RETRY_SECONDS = 5;
 const MAX_RETRY_SECONDS = 300;
 
 @Injectable()
@@ -18,10 +18,14 @@ export class SqsTransactionWorker implements OnApplicationBootstrap, OnApplicati
   private client: SQSClient | undefined;
   private queueUrl = "";
   private dlqUrl = "";
+  private baseRetrySeconds = 5;
   private running: Promise<void> = Promise.resolve();
   private readonly abort = new AbortController();
 
-  constructor(private readonly consumer: WagerTransactionConsumer) {}
+  constructor(
+    private readonly consumer: WagerTransactionConsumer,
+    private readonly metrics: MetricsService,
+  ) {}
 
   onApplicationBootstrap(): void {
     if (process.env.SQS_CONSUMER_ENABLED === "false") {
@@ -34,6 +38,7 @@ export class SqsTransactionWorker implements OnApplicationBootstrap, OnApplicati
     }
     this.queueUrl = queueUrl;
     this.dlqUrl = dlqUrl;
+    this.baseRetrySeconds = Number(process.env.SQS_RETRY_BASE_SECONDS ?? 5);
     this.client = new SQSClient({
       region: process.env.AWS_REGION ?? "us-east-1",
       endpoint: process.env.SQS_ENDPOINT || undefined,
@@ -70,7 +75,7 @@ export class SqsTransactionWorker implements OnApplicationBootstrap, OnApplicati
         if (this.abort.signal.aborted) {
           return;
         }
-        this.logger.error(`Erro ao ler a fila: ${describe(error)}`);
+        this.logger.error({ message: "queue.receive_failed", error: describe(error) });
         await new Promise((resolve) => setTimeout(resolve, 1000));
       }
     }
@@ -98,7 +103,8 @@ export class SqsTransactionWorker implements OnApplicationBootstrap, OnApplicati
   }
 
   private async sendToDlq(client: SQSClient, message: Message, reason: string): Promise<void> {
-    this.logger.warn(`Mensagem ${message.MessageId} enviada para a DLQ: ${reason}`);
+    this.metrics.messageSentToDlq();
+    this.logger.warn({ message: "message.sent_to_dlq", sqsMessageId: message.MessageId, reason });
     await client.send(
       new SendMessageCommand({
         QueueUrl: this.dlqUrl,
@@ -112,10 +118,15 @@ export class SqsTransactionWorker implements OnApplicationBootstrap, OnApplicati
 
   private async retryLater(client: SQSClient, message: Message, error: unknown): Promise<void> {
     const receiveCount = Number(message.Attributes?.ApproximateReceiveCount ?? 1);
-    const delay = Math.min(BASE_RETRY_SECONDS * 2 ** (receiveCount - 1), MAX_RETRY_SECONDS);
-    this.logger.warn(
-      `Falha ao processar ${message.MessageId} (tentativa ${receiveCount}), nova tentativa em ${delay}s: ${describe(error)}`,
-    );
+    this.metrics.retryScheduled("sqs");
+    const delay = Math.min(this.baseRetrySeconds * 2 ** (receiveCount - 1), MAX_RETRY_SECONDS);
+    this.logger.warn({
+      message: "message.retry_scheduled",
+      sqsMessageId: message.MessageId,
+      receiveCount,
+      delaySeconds: delay,
+      error: describe(error),
+    });
     await client.send(
       new ChangeMessageVisibilityCommand({
         QueueUrl: this.queueUrl,

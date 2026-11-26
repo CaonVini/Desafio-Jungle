@@ -1,10 +1,11 @@
 import { NestFactory } from "@nestjs/core";
 import { AppModule } from "./app.module";
-import { AllExceptionsFilter } from "./shared/http/all-exceptions.filter";
+import { configureApp } from "./app.setup";
+import { JsonLogger } from "./shared/logging/json-logger";
 
 async function bootstrap(): Promise<void> {
-  const app = await NestFactory.create(AppModule);
-  app.useGlobalFilters(new AllExceptionsFilter());
+  const app = await NestFactory.create(AppModule, { logger: new JsonLogger() });
+  configureApp(app);
   app.enableShutdownHooks();
   await app.listen(process.env.PORT ?? 3000);
 }
