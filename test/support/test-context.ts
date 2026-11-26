@@ -3,6 +3,9 @@ import { ConfigModule } from "@nestjs/config";
 import { Test, TestingModule } from "@nestjs/testing";
 import { TypeOrmModule } from "@nestjs/typeorm";
 import { DataSource } from "typeorm";
+import { InboxConsumerService } from "../../src/inbox/application/inbox-consumer.service";
+import { EventHandler } from "../../src/inbox/domain/event-handler";
+import { InboxModule } from "../../src/inbox/inbox.module";
 import { OutboxPublisherService } from "../../src/outbox/application/outbox-publisher.service";
 import { MessagePublisher } from "../../src/outbox/domain/message-publisher";
 import { OutboxModule } from "../../src/outbox/outbox.module";
@@ -13,6 +16,7 @@ import { WageringModule } from "../../src/wagering/wagering.module";
 import { CreateWalletUseCase } from "../../src/wallet/application/create-wallet.use-case";
 import { GetWalletUseCase } from "../../src/wallet/application/get-wallet.use-case";
 import { WalletModule } from "../../src/wallet/wallet.module";
+import { FakeEventHandler } from "./fake-event-handler";
 import { FakeMessagePublisher } from "./fake-message-publisher";
 import { prepareTestDatabase, TEST_DATABASE } from "./test-database";
 
@@ -24,11 +28,14 @@ export interface TestContext {
   getWallet: GetWalletUseCase;
   outboxPublisher: OutboxPublisherService;
   broker: FakeMessagePublisher;
+  inboxConsumer: InboxConsumerService;
+  eventHandler: FakeEventHandler;
   reset(): Promise<void>;
   close(): Promise<void>;
   ledgerCount(walletId: string, direction?: "DEBIT" | "CREDIT"): Promise<number>;
   invariant(walletId: string): Promise<{ balance: string; ledger: string }>;
   outboxEvents(): Promise<OutboxRow[]>;
+  inboxCount(): Promise<number>;
 }
 
 export interface OutboxRow {
@@ -43,6 +50,7 @@ export async function createTestContext(): Promise<TestContext> {
   await prepareTestDatabase();
 
   const broker = new FakeMessagePublisher();
+  const eventHandler = new FakeEventHandler();
   const moduleRef = await Test.createTestingModule({
     imports: [
       ConfigModule.forRoot({ isGlobal: true }),
@@ -55,12 +63,15 @@ export async function createTestContext(): Promise<TestContext> {
       }),
       PersistenceModule,
       OutboxModule,
+      InboxModule,
       WalletModule,
       WageringModule,
     ],
   })
     .overrideProvider(MessagePublisher)
     .useValue(broker)
+    .overrideProvider(EventHandler)
+    .useValue(eventHandler)
     .compile();
   await moduleRef.init();
 
@@ -69,20 +80,26 @@ export async function createTestContext(): Promise<TestContext> {
   return {
     moduleRef,
     dataSource,
-    processTransaction: moduleRef.get(ProcessWagerTransactionUseCase, { strict: false }),
+    processTransaction: moduleRef.get(ProcessWagerTransactionUseCase, {
+      strict: false,
+    }),
     createWallet: moduleRef.get(CreateWalletUseCase, { strict: false }),
     getWallet: moduleRef.get(GetWalletUseCase, { strict: false }),
     outboxPublisher: moduleRef.get(OutboxPublisherService, { strict: false }),
     broker,
+    inboxConsumer: moduleRef.get(InboxConsumerService, { strict: false }),
+    eventHandler,
 
     async reset() {
       broker.sent.length = 0;
       broker.failing = false;
+      eventHandler.handled.length = 0;
+      eventHandler.failing = false;
       if (dataSource.options.database !== TEST_DATABASE) {
         throw new Error("Refusing to truncate a database that is not the test database");
       }
       await dataSource.query(
-        "TRUNCATE TABLE outbox_events, wallet_ledger_entries, wager_transactions, wallets RESTART IDENTITY CASCADE",
+        "TRUNCATE TABLE inbox_messages, outbox_events, wallet_ledger_entries, wager_transactions, wallets RESTART IDENTITY CASCADE",
       );
     },
 
@@ -106,6 +123,11 @@ export async function createTestContext(): Promise<TestContext> {
            FROM outbox_events
           ORDER BY created_at, id`,
       );
+    },
+
+    async inboxCount() {
+      const rows = await dataSource.query("SELECT count(*)::int AS total FROM inbox_messages");
+      return rows[0].total;
     },
 
     async invariant(walletId) {
