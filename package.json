@@ -17,6 +17,7 @@
     "test": "bun test",
     "test:unit": "bun test src",
     "test:integration": "bun test test",
+    "test:process": "bun test test/process",
     "test:watch": "bun test --watch",
     "test:cov": "bun test --coverage",
     "typeorm": "bun ./node_modules/typeorm/cli.js -d src/shared/infra/database/data-source.ts",
