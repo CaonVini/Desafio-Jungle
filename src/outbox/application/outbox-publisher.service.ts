@@ -1,4 +1,5 @@
 import { Injectable, Logger } from "@nestjs/common";
+import { MetricsService } from "../../metrics/metrics.service";
 import { TransactionManager } from "../../shared/domain/transaction-manager";
 import { MessagePublisher } from "../domain/message-publisher";
 import { OutboxRepository } from "../domain/outbox.repository";
@@ -25,9 +26,13 @@ export class OutboxPublisherService {
     private readonly transactions: TransactionManager,
     private readonly outbox: OutboxRepository,
     private readonly publisher: MessagePublisher,
+    private readonly metrics: MetricsService,
   ) {}
 
-  async publishBatch(now: Date = new Date(), limit: number = OUTBOX_BATCH_SIZE): Promise<PublishBatchResult> {
+  async publishBatch(
+    now: Date = new Date(),
+    limit: number = OUTBOX_BATCH_SIZE,
+  ): Promise<PublishBatchResult> {
     return this.transactions.run(async (tx) => {
       const events = await this.outbox.claimPending(tx, now, limit);
       let published = 0;
@@ -35,18 +40,35 @@ export class OutboxPublisherService {
 
       for (const event of events) {
         try {
-          await this.publisher.publish({ id: event.id, type: event.eventType, payload: event.payload });
+          await this.publisher.publish({
+            id: event.id,
+            type: event.eventType,
+            payload: event.payload,
+          });
         } catch (error) {
           failed++;
+          this.metrics.retryScheduled("outbox");
           const message = error instanceof Error ? error.message : String(error);
           const nextAttemptAt = new Date(now.getTime() + backoffDelayMs(event.attempts + 1));
           await this.outbox.markFailed(tx, event.id, message, nextAttemptAt);
-          this.logger.warn(
-            `Falha ao publicar evento ${event.id} (tentativa ${event.attempts + 1}): ${message}`,
-          );
+          this.logger.warn({
+            message: "outbox.publish_failed",
+            eventId: event.id,
+            transactionId: event.transactionId,
+            eventType: event.eventType,
+            attempts: event.attempts + 1,
+            error: message,
+          });
           break;
         }
         await this.outbox.markPublished(tx, event.id, new Date());
+        this.logger.log({
+          message: "outbox.event_published",
+          eventId: event.id,
+          transactionId: event.transactionId,
+          eventType: event.eventType,
+        });
+        this.metrics.outboxPublished();
         published++;
       }
 

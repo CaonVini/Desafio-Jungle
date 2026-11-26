@@ -37,7 +37,10 @@ export class OutboxWorker implements OnApplicationBootstrap, OnApplicationShutdo
     try {
       await this.service.publishBatch();
     } catch (error) {
-      this.logger.error(`Erro no ciclo do outbox: ${error instanceof Error ? error.message : String(error)}`);
+      this.logger.error({
+        message: "outbox.worker_cycle_failed",
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
     this.schedule();
   }

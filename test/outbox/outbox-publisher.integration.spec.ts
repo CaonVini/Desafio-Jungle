@@ -3,6 +3,7 @@ import { v7 as uuidv7 } from "uuid";
 import { backoffDelayMs } from "../../src/outbox/application/outbox-publisher.service";
 import { OutboxRepository } from "../../src/outbox/domain/outbox.repository";
 import { TransactionManager } from "../../src/shared/domain/transaction-manager";
+import { WagerTransactionKind } from "../../src/wagering/domain/wager-transaction.enums";
 import { WalletOutput } from "../../src/wallet/application/wallet.output";
 import { transactionInput } from "../support/fixtures";
 import { createTestContext, TestContext } from "../support/test-context";
@@ -29,7 +30,9 @@ describe("Outbox publisher (integration)", () => {
 
   async function createEvents(count: number): Promise<void> {
     for (let i = 0; i < count; i++) {
-      await ctx.processTransaction.execute(transactionInput(wallet));
+      await ctx.processTransaction.execute(
+        transactionInput(wallet, { kind: WagerTransactionKind.Loss }),
+      );
     }
   }
 
@@ -50,7 +53,7 @@ describe("Outbox publisher (integration)", () => {
 
     const [row] = await ctx.dataSource.query("SELECT id FROM outbox_events");
     expect(ctx.broker.sent[0].id).toBe(row.id);
-    expect(ctx.broker.sent[0].type).toBe("wager.transaction.processed");
+    expect(ctx.broker.sent[0].type).toBe("WagerTransactionProcessed");
   });
 
   it("nao republica o que ja foi publicado", async () => {
@@ -89,9 +92,13 @@ describe("Outbox publisher (integration)", () => {
     const tooEarly = await ctx.outboxPublisher.publishBatch(new Date(now.getTime() + 500));
     expect(tooEarly.claimed).toBe(0);
 
-    const later = await ctx.outboxPublisher.publishBatch(new Date(now.getTime() + backoffDelayMs(1) + 1));
+    const later = await ctx.outboxPublisher.publishBatch(
+      new Date(now.getTime() + backoffDelayMs(1) + 1),
+    );
     expect(later).toEqual({ claimed: 1, published: 1, failed: 0 });
-    const [row] = await ctx.dataSource.query("SELECT status, attempts, last_error FROM outbox_events");
+    const [row] = await ctx.dataSource.query(
+      "SELECT status, attempts, last_error FROM outbox_events",
+    );
     expect(row).toMatchObject({ status: "PUBLISHED", attempts: 2, last_error: null });
   });
 
@@ -102,7 +109,9 @@ describe("Outbox publisher (integration)", () => {
     const result = await ctx.outboxPublisher.publishBatch();
 
     expect(result).toEqual({ claimed: 3, published: 0, failed: 1 });
-    const rows = await ctx.dataSource.query("SELECT attempts FROM outbox_events ORDER BY attempts DESC");
+    const rows = await ctx.dataSource.query(
+      "SELECT attempts FROM outbox_events ORDER BY attempts DESC",
+    );
     expect(rows.map((r: { attempts: number }) => r.attempts)).toEqual([1, 0, 0]);
   });
 
@@ -121,7 +130,6 @@ describe("Outbox publisher (integration)", () => {
 
     await transactions.run(async (txA) => {
       const a = await outbox.claimPending(txA, new Date(), 3);
-      // A ainda esta com as 3 linhas travadas. Sem SKIP LOCKED, B ficaria esperando aqui.
       const b = await transactions.run((txB) => outbox.claimPending(txB, new Date(), 3));
 
       expect(a).toHaveLength(3);
@@ -134,7 +142,9 @@ describe("Outbox publisher (integration)", () => {
   it("varios publicadores em paralelo publicam cada evento uma unica vez", async () => {
     await createEvents(20);
 
-    await Promise.all(Array.from({ length: 5 }, () => ctx.outboxPublisher.publishBatch(new Date(), 4)));
+    await Promise.all(
+      Array.from({ length: 5 }, () => ctx.outboxPublisher.publishBatch(new Date(), 4)),
+    );
 
     const ids = ctx.broker.sent.map((m) => m.id);
     expect(ids).toHaveLength(20);
