@@ -3,20 +3,17 @@ import { ConfigModule } from "@nestjs/config";
 import { Test, TestingModule } from "@nestjs/testing";
 import { TypeOrmModule } from "@nestjs/typeorm";
 import { DataSource } from "typeorm";
-import { InboxConsumerService } from "../../src/inbox/application/inbox-consumer.service";
-import { EventHandler } from "../../src/inbox/domain/event-handler";
-import { InboxModule } from "../../src/inbox/inbox.module";
 import { OutboxPublisherService } from "../../src/outbox/application/outbox-publisher.service";
 import { MessagePublisher } from "../../src/outbox/domain/message-publisher";
 import { OutboxModule } from "../../src/outbox/outbox.module";
 import { PersistenceModule } from "../../src/persistence.module";
 import { buildTypeOrmOptions } from "../../src/shared/infra/database/typeorm.options";
+import { WagerTransactionConsumer } from "../../src/wagering/messaging/wager-transaction-consumer";
 import { ProcessWagerTransactionUseCase } from "../../src/wagering/application/process-wager-transaction.use-case";
 import { WageringModule } from "../../src/wagering/wagering.module";
 import { CreateWalletUseCase } from "../../src/wallet/application/create-wallet.use-case";
 import { GetWalletUseCase } from "../../src/wallet/application/get-wallet.use-case";
 import { WalletModule } from "../../src/wallet/wallet.module";
-import { FakeEventHandler } from "./fake-event-handler";
 import { FakeMessagePublisher } from "./fake-message-publisher";
 import { prepareTestDatabase, TEST_DATABASE } from "./test-database";
 
@@ -28,8 +25,7 @@ export interface TestContext {
   getWallet: GetWalletUseCase;
   outboxPublisher: OutboxPublisherService;
   broker: FakeMessagePublisher;
-  inboxConsumer: InboxConsumerService;
-  eventHandler: FakeEventHandler;
+  consumer: WagerTransactionConsumer;
   reset(): Promise<void>;
   close(): Promise<void>;
   ledgerCount(walletId: string, direction?: "DEBIT" | "CREDIT"): Promise<number>;
@@ -50,7 +46,6 @@ export async function createTestContext(): Promise<TestContext> {
   await prepareTestDatabase();
 
   const broker = new FakeMessagePublisher();
-  const eventHandler = new FakeEventHandler();
   const moduleRef = await Test.createTestingModule({
     imports: [
       ConfigModule.forRoot({ isGlobal: true }),
@@ -63,15 +58,12 @@ export async function createTestContext(): Promise<TestContext> {
       }),
       PersistenceModule,
       OutboxModule,
-      InboxModule,
       WalletModule,
       WageringModule,
     ],
   })
     .overrideProvider(MessagePublisher)
     .useValue(broker)
-    .overrideProvider(EventHandler)
-    .useValue(eventHandler)
     .compile();
   await moduleRef.init();
 
@@ -87,14 +79,11 @@ export async function createTestContext(): Promise<TestContext> {
     getWallet: moduleRef.get(GetWalletUseCase, { strict: false }),
     outboxPublisher: moduleRef.get(OutboxPublisherService, { strict: false }),
     broker,
-    inboxConsumer: moduleRef.get(InboxConsumerService, { strict: false }),
-    eventHandler,
+    consumer: moduleRef.get(WagerTransactionConsumer, { strict: false }),
 
     async reset() {
       broker.sent.length = 0;
       broker.failing = false;
-      eventHandler.handled.length = 0;
-      eventHandler.failing = false;
       if (dataSource.options.database !== TEST_DATABASE) {
         throw new Error("Refusing to truncate a database that is not the test database");
       }
