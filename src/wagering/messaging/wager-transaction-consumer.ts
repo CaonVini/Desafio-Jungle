@@ -1,13 +1,16 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { InboxRepository } from "../../inbox/domain/inbox.repository";
+import { MetricsService } from "../../metrics/metrics.service";
 import { DomainError } from "../../shared/domain/domain-error";
 import { Money } from "../../shared/domain/money";
 import { TransactionManager } from "../../shared/domain/transaction-manager";
 import { asObject, readString } from "../../shared/http/payload-parser";
+import { runWithCorrelationId } from "../../shared/logging/correlation";
 import {
   ProcessWagerTransactionInput,
   ProcessWagerTransactionUseCase,
 } from "../application/process-wager-transaction.use-case";
+import { logTransaction } from "../application/transaction-log";
 import { parseWagerInput } from "../application/wager-input.parser";
 
 export const CONSUMER_NAME = "wager-transactions";
@@ -24,6 +27,7 @@ export class PermanentMessageError extends Error {
 
 interface ParsedMessage {
   messageId: string;
+  correlationId: string;
   type: string;
   input: ProcessWagerTransactionInput;
 }
@@ -36,34 +40,64 @@ export class WagerTransactionConsumer {
     private readonly transactions: TransactionManager,
     private readonly inbox: InboxRepository,
     private readonly processTransaction: ProcessWagerTransactionUseCase,
+    private readonly metrics: MetricsService,
   ) {}
 
   async consume(body: string): Promise<ConsumeOutcome> {
     const message = parseMessage(body);
+    const { messageId, input } = message;
+    const context = {
+      messageId,
+      walletId: input.walletId,
+      providerId: input.providerId,
+    };
 
-    try {
-      return await this.transactions.run(async (tx) => {
-        const isNew = await this.inbox.registerIfAbsent(tx, {
-          consumerName: CONSUMER_NAME,
-          messageId: message.messageId,
-          messageType: message.type,
-          receivedAt: new Date(),
+    return runWithCorrelationId(message.correlationId, async () => {
+      const startedAt = performance.now();
+      try {
+        const { outcome, result } = await this.transactions.run(async (tx) => {
+          const isNew = await this.inbox.registerIfAbsent(tx, {
+            consumerName: CONSUMER_NAME,
+            messageId,
+            messageType: message.type,
+            receivedAt: new Date(),
+          });
+          if (!isNew) {
+            return { outcome: "DUPLICATE" as const, result: undefined };
+          }
+          const result = await this.processTransaction.executeWithin(tx, input);
+          return { outcome: "PROCESSED" as const, result };
         });
-        if (!isNew) {
-          return "DUPLICATE";
+
+        if (result) {
+          this.metrics.recordResult(
+            result.transaction.status,
+            result.idempotentReplay,
+            performance.now() - startedAt,
+          );
+          logTransaction(this.logger, result.transaction, {
+            ...context,
+            source: "sqs",
+            idempotentReplay: result.idempotentReplay,
+          });
+        } else {
+          this.metrics.duplicateDetected();
+          this.logger.log({ message: "message.duplicate", ...context });
         }
-        await this.processTransaction.executeWithin(tx, message.input);
-        return "PROCESSED";
-      });
-    } catch (error) {
-      if (error instanceof DomainError) {
-        this.logger.warn(
-          `Mensagem ${message.messageId} rejeitada por regra de negocio: ${error.code}`,
-        );
-        return "BUSINESS_ERROR";
+        return outcome;
+      } catch (error) {
+        if (error instanceof DomainError && error.code !== "WALLET_CONCURRENT_UPDATE") {
+          this.logger.warn({ message: "message.business_error", code: error.code, ...context });
+          return "BUSINESS_ERROR";
+        }
+        this.logger.warn({
+          message: "message.failed",
+          error: error instanceof Error ? error.message : String(error),
+          ...context,
+        });
+        throw error;
       }
-      throw error;
-    }
+    });
   }
 }
 
@@ -79,6 +113,11 @@ function parseMessage(body: string): ParsedMessage {
       throw new DomainError("occurredAt must be an ISO date", "INVALID_PAYLOAD");
     }
 
+    const correlationId =
+      typeof envelope["correlationId"] === "string" && envelope["correlationId"].length <= 128
+        ? envelope["correlationId"]
+        : messageId;
+
     const data = asObject(envelope["data"], "data");
     const idempotencyKey =
       typeof data["idempotencyKey"] === "string"
@@ -87,7 +126,7 @@ function parseMessage(body: string): ParsedMessage {
     const input = parseWagerInput(data, idempotencyKey);
     Money.from(input.money);
 
-    return { messageId, type, input };
+    return { messageId, correlationId, type, input };
   } catch (error) {
     if (error instanceof SyntaxError || error instanceof DomainError) {
       throw new PermanentMessageError(error.message);
