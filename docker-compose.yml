@@ -16,7 +16,8 @@ services:
       timeout: 3s
       retries: 10
 
-  localstack:                                   # NOVO
+  localstack:
+    # Desde mar/2026 a tag "latest" exige LOCALSTACK_AUTH_TOKEN. Fixamos uma versão sem essa exigência.
     image: localstack/localstack:${LOCALSTACK_IMAGE_TAG:-4.12}
     container_name: wagering-localstack
     environment:
@@ -27,10 +28,11 @@ services:
     volumes:
       - ./localstack/init:/etc/localstack/init/ready.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "[ \"$$(awslocal sqs list-queues | grep -c wagering-events)\" = \"2\" ]"]
+      test: ["CMD-SHELL", "[ \"$$(awslocal sqs list-queues | grep -c 000000000000)\" = \"3\" ]"]
       interval: 5s
       timeout: 5s
       retries: 20
 
 volumes:
   pgdata:
+
