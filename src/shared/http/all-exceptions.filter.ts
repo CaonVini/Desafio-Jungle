@@ -1,6 +1,8 @@
 import { ArgumentsHost, Catch, ExceptionFilter, HttpException, Logger } from "@nestjs/common";
 import { Response } from "express";
+import { DatabaseBusyError } from "../domain/database-busy.error";
 import { DomainError } from "../domain/domain-error";
+import { CORRELATION_ID_HEADER } from "./correlation-id.interceptor";
 
 const STATUS_BY_CODE: Record<string, number> = {
   INVALID_PAYLOAD: 400,
@@ -27,6 +29,12 @@ export class AllExceptionsFilter implements ExceptionFilter {
       return;
     }
 
+    if (exception instanceof DatabaseBusyError) {
+      response.setHeader("Retry-After", "1");
+      response.status(503).json({ code: exception.code, message: "Service busy, retry shortly" });
+      return;
+    }
+
     if (exception instanceof HttpException) {
       response
         .status(exception.getStatus())
@@ -35,8 +43,12 @@ export class AllExceptionsFilter implements ExceptionFilter {
     }
 
     this.logger.error(
-      "Unhandled error",
-      exception instanceof Error ? exception.stack : String(exception),
+      {
+        message: "request.unhandled_error",
+        correlationId: response.getHeader(CORRELATION_ID_HEADER),
+        error: exception instanceof Error ? exception.message : String(exception),
+      },
+      exception instanceof Error ? exception.stack : undefined,
     );
     response.status(500).json({ code: "INTERNAL_ERROR", message: "Internal server error" });
   }
