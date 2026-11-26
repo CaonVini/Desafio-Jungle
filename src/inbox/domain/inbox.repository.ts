@@ -1,10 +1,12 @@
 import { TransactionContext } from "../../shared/domain/transaction-manager";
-import { ReceivedEvent } from "./received-event";
+
+export interface InboxEntry {
+  consumerName: string;
+  messageId: string;
+  messageType: string;
+  receivedAt: Date;
+}
 
 export abstract class InboxRepository {
-  abstract registerIfAbsent(
-    tx: TransactionContext,
-    event: ReceivedEvent,
-    processedAt: Date,
-  ): Promise<boolean>;
+  abstract registerIfAbsent(tx: TransactionContext, entry: InboxEntry): Promise<boolean>;
 }
