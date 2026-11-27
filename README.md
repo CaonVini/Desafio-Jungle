@@ -180,4 +180,18 @@ Os valores padrão já estão no `.env.example`, então não precisa mudar nada 
 | `DB_STATEMENT_TIMEOUT_MS` | Tempo máximo de uma consulta (padrão 15000) |
 | `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS` | Derruba conexão parada dentro de uma transação (padrão 30000) |
 | `APP_REPLICAS` | Número de réplicas da API no Docker Compose (padrão 3) |
- 
+
+## Medição do teste de carga
+
+O `bun run test:load` cria carteiras, dispara 500 apostas de 1,00 em paralelo, reenvia 10% delas com a mesma chave para conferir o replay e, no fim, compara o saldo de cada carteira com o esperado e roda a reconciliação do ledger.
+
+Os números abaixo vieram de uma execução com 3 instâncias da API, PostgreSQL real e SQS simulado, todos na mesma máquina e sem passar pelo Nginx. Eles mostram a ordem de grandeza e não devem ser lidos como capacidade máxima.
+
+| Cenário | Tempo | Vazão | p50 | p95 | p99 | Máx. |
+|---|---|---|---|---|---|---|
+| 10 carteiras com saldo 40, concorrência 50 | 2,17 s | 230 apostas/s | 181 ms | 440 ms | 571 ms | 986 ms |
+| 1 carteira com saldo 100, concorrência 100 | 3,18 s | 157 apostas/s | 522 ms | 1099 ms | 1256 ms | 1478 ms |
+
+No primeiro cenário, 400 apostas foram aceitas (`200`) e 100 rejeitadas por saldo insuficiente (`422`), exatamente o esperado. No segundo, que concentra tudo numa carteira só, foram 100 aceitas e 400 rejeitadas. Em ambos não houve `503`, as 50 repetições devolveram o resultado original e todas as carteiras fecharam com saldo igual ao esperado e ledger consistente.
+
+A carteira única é mais lenta porque as apostas da mesma carteira andam uma por vez, por causa do lock. Isso é esperado e é o que garante que o saldo nunca fique negativo.
