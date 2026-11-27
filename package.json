@@ -23,7 +23,8 @@
     "typeorm": "bun ./node_modules/typeorm/cli.js -d src/shared/infra/database/data-source.ts",
     "migration:create": "bun ./node_modules/typeorm/cli.js migration:create",
     "migration:run": "bun run typeorm migration:run",
-    "migration:revert": "bun run typeorm migration:revert"
+    "migration:revert": "bun run typeorm migration:revert",
+    "test:load": "bun test/load/run-load.ts"
   },
   "dependencies": {
     "@aws-sdk/client-sqs": "^3.1178.0",
